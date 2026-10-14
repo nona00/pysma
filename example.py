@@ -1,100 +1,79 @@
 #!/usr/bin/env python
 """Basic usage example and testing of pysma."""
-
 import argparse
 import asyncio
 import logging
 import signal
 import sys
-from dataclasses import asdict
-from typing import Any
 
 import aiohttp
 
-from pysma import exceptions, sma_webconnect
+import pysma
 
-# This example will work with Python 3.9+
+# This module will work with Python 3.5+
+# Python 3.4+ "@asyncio.coroutine" decorator
+# Python 3.5+ uses "async def f()" syntax
 
-_LOG = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 VAR = {}
 
 
-def print_table(sensors: sma_webconnect.Sensors) -> None:
-    """Print sensors formatted as table."""
+def print_table(sensors):
     for sen in sensors:
         if sen.value is None:
-            print(f"{sen.name:>25}")
+            print("{:>25}".format(sen.name))
         else:
-            print(f"{sen.name:>25}{sen.value!s:>15} {sen.unit}")
+            print("{:>25}{:>15} {}".format(sen.name, str(sen.value), sen.unit))
 
 
-async def main_loop(password: str, user: str, url: str) -> None:
-    """Run main loop."""
+async def main_loop(password, user, ip):  # pylint: disable=invalid-name
+    """Main loop."""
     async with aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(ssl=False)
+        connector=aiohttp.TCPConnector(ssl=True)
     ) as session:
-        VAR["sma"] = sma_webconnect.SMAWebConnect(
-            session, url, password=password, group=user
-        )
-
-        try:
-            await VAR["sma"].new_session()
-        except exceptions.SmaAuthenticationException:
-            _LOG.warning("Authentication failed!")
-            return
-        except exceptions.SmaConnectionException:
-            _LOG.warning("Unable to connect to device at %s", url)
+        VAR["sma"] = pysma.SMA(session, ip, password=password, group=user)
+        await VAR["sma"].new_session()
+        if VAR["sma"].sma_sid is None:
+            _LOGGER.info("No session ID")
             return
 
-        # We should not get any exceptions, but if we do we will close the session.
-        try:
-            VAR["running"] = True  # type: ignore[assignment]
-            cnt = 5
-            sensors = await VAR["sma"].get_sensors()
-            device_info = await VAR["sma"].device_info()
+        _LOGGER.debug("NEW SID: %s", VAR["sma"].sma_sid)
 
-            for name, value in asdict(device_info).items():
-                print(f"{name:>15}{value:>25}")
+        VAR["running"] = True
+        cnt = 1
+        sensors = pysma.Sensors()
+        while VAR.get("running"):
+            await VAR["sma"].read(sensors)
+            print_table(sensors)
+            cnt -= 1
+            if cnt == 0:
+                break
+            await asyncio.sleep(2)
 
-            # enable all sensors
-            for sensor in sensors:
-                sensor.enabled = True
-
-            while VAR.get("running"):
-                await VAR["sma"].read(sensors)
-                print_table(sensors)
-                cnt -= 1
-                if cnt == 0:
-                    break
-                await asyncio.sleep(2)
-        finally:
-            _LOG.info("Closing Session...")
-            await VAR["sma"].close_session()
+        await VAR["sma"].close_session()
 
 
-async def main() -> None:
-    """Run example."""
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+def main():
+    """Main example."""
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
     parser = argparse.ArgumentParser(description="Test the SMA webconnect library.")
-    parser.add_argument(
-        "url",
-        type=str,
-        help="Web address of the Webconnect module (http://ip-address or https://ip-address)",
-    )
-    parser.add_argument("user", choices=["user", "installer"], help="Login username")
-    parser.add_argument("password", help="Login password")
+    parser.add_argument("ip", type=str, help="IP address of the Webconnect module")
+    parser.add_argument("user", help="installer/user")
+    parser.add_argument("password", help="Installer password")
 
     args = parser.parse_args()
 
-    def _shutdown(*_: Any) -> None:
-        VAR["running"] = False  # type: ignore[assignment]
+    def _shutdown(*_):
+        VAR["running"] = False
 
     signal.signal(signal.SIGINT, _shutdown)
 
-    await main_loop(user=args.user, password=args.password, url=args.url)
+    asyncio.run(
+        main_loop(user=args.user, password=args.password, ip=args.ip)
+    )
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
